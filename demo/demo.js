@@ -12,6 +12,7 @@ try {
     }
   }
   if (id) {
+    console.log("Answering offer...");
     document.getElementById('stdout').innerHTML = "Answering offer...";
     var Answer = WebRTCPeer.Answer;
     var answer = new Answer(broker + "/offer/" + id);
@@ -39,6 +40,7 @@ try {
       document.getElementById('stdout').innerHTML = "Error connecting. Is this a valid URL?";
     };
   } else {
+    console.log("Making offer...");
     // New session, make an offer.
     var Offer = WebRTCPeer.Offer;
     var offer = new Offer(broker);

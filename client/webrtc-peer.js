@@ -7,13 +7,25 @@ define(['module'], function(module) {
     }
   }
 
+  function createPeerConnection() {
+    if (window.mozRTCPeerConnection)
+      return new mozRTCPeerConnection();
+    if (window.webkitRTCPeerConnection)
+      return new webkitRTCPeerConnection(null);
+    return null;
+  }
+
   function Offer(url, optMetadata, optExpires) {
     var offer = this;
     this.onpending = null;
     this.oncomplete = null;
     this.onerror = null;
     this.id = undefined;
-    this.pc = new mozRTCPeerConnection();
+    this.pc = createPeerConnection();
+    if (this.pc == null) {
+      fail("No RTCPeerConnection implemenation");
+      return;
+    }
 
     function fail(error) {
       if(offer.onerror && 'function' === typeof offer.onerror) {
@@ -23,11 +35,7 @@ define(['module'], function(module) {
       }
     }
 
-    //XXX: This is a hack until RTCPeerConnection provides API for
-    // adding a network flow for DataChannels
-    navigator.mozGetUserMedia({audio: true, fake: true}, function(stream) {
-      // Now we have a fake stream.
-      offer.pc.addStream(stream);
+    function createOffer() {
       offer.pc.createOffer(function(rtc_offer) {
         // Now we have an offer SDP to give.
         var xhr = new XMLHttpRequest();
@@ -49,6 +57,12 @@ define(['module'], function(module) {
               // Now we have the answer SDP from the other end, so
               // set it as the remote description.
               var rtc_answer = {'type':'answer', 'sdp': JSON.parse(e.data).value};
+              try {
+                //XXX: WebKit doesn't accept a raw JS object for the
+                // RTCSessionDescription parameter, and Gecko's constructor
+                // takes different args anyway.
+                rtc_answer = new RTCSessionDescription(rtc_answer);
+              } catch(e) {}
               offer.pc.setRemoteDescription(rtc_answer, function() {
                 // Now the remote description is set.
                 if(offer.oncomplete && 'function' === typeof offer.oncomplete) {
@@ -75,7 +89,24 @@ define(['module'], function(module) {
         xhr.send(JSON.stringify({offer: rtc_offer.sdp}));
       },
                            function(err) { fail(err); });
-    }, function(err) { fail(err); });
+    }
+
+    //XXX: This is a hack until RTCPeerConnection provides API for
+    // adding a network flow for DataChannels
+    if (navigator.mozGetUserMedia) {
+      console.log("calling mozGetUserMedia");
+      navigator.mozGetUserMedia({audio: true, fake: true}, function(stream) {
+        console.log("mozGetUserMedia");
+        // Now we have a fake stream.
+        offer.pc.addStream(stream);
+        createOffer();
+      }, function(err) { fail(err); });
+    } else {
+      console.log("no mozGetUserMedia");
+      //XXX: should have a hook for applications to add streams, otherwise
+      // this isn't very useful
+      createOffer();
+    }
   }
 
   function Answer(url) {
@@ -91,6 +122,39 @@ define(['module'], function(module) {
       }
     }
 
+    function createAnswer(offer) {
+      answer.pc.setRemoteDescription(offer, function() {
+        // Now the remote description is set.
+        answer.pc.createAnswer(function(rtc_answer) {
+          // Now we have an answer SDP to give.
+          // First set it as local description.
+          answer.pc.setLocalDescription(rtc_answer, function() {
+            // Now the local description is set, so pass the answer
+            // SDP back to the broker.
+            var postXhr = new XMLHttpRequest();
+            postXhr.open('POST', url + '/answer');
+            postXhr.setRequestHeader('content-type', 'application/json');
+            postXhr.onreadystatechange = function() {
+              if(4 !== postXhr.readyState) {
+                return;
+              }
+              if(200 === postXhr.status) {
+                if(answer.oncomplete && 'function' === typeof answer.oncomplete) {
+                  answer.oncomplete.call(null, answer.pc);
+                }
+              } else {
+                if(answer.onerror && 'function' === typeof answer.onerror) {
+                  answer.onerror.call(null, new Error(postXhr.statusText));
+                }
+              }
+            };
+            postXhr.send(JSON.stringify({value: rtc_answer.sdp}));
+          }, function(err) { fail(err); });
+        }, function(err) { fail(err); });
+      },
+                                     function(err) { fail(err); });
+    }
+
     var getXhr = new XMLHttpRequest();
     getXhr.open('GET', url + '/offer');
     getXhr.onreadystatechange = function() {
@@ -100,44 +164,31 @@ define(['module'], function(module) {
       if(200 === getXhr.status) {
         var response = JSON.parse(getXhr.responseText);
         var offer = {'type': 'offer', 'sdp': response.value};
-        answer.pc = new mozRTCPeerConnection();
+        try {
+          //XXX: WebKit doesn't accept a raw JS object for the
+          // RTCSessionDescription parameter, and Gecko's constructor
+          // takes different args anyway.
+          offer = new RTCSessionDescription(offer);
+        } catch(e) {}
+        answer.pc = createPeerConnection();
+        if (answer.pc == null) {
+          fail("No RTCPeerConnection implemenation");
+          return;
+        }
 
         //XXX: This is a hack until RTCPeerConnection provides API for
         // adding a network flow for DataChannels
-        navigator.mozGetUserMedia({audio: true, fake: true}, function(stream) {
-          // Now we have a fake stream.
-          answer.pc.addStream(stream);
-          answer.pc.setRemoteDescription(offer, function() {
-            // Now the remote description is set.
-            answer.pc.createAnswer(function(rtc_answer) {
-              // Now we have an answer SDP to give.
-              // First set it as local description.
-              answer.pc.setLocalDescription(rtc_answer, function() {
-                // Now the local description is set, so pass the answer
-                // SDP back to the broker.
-                var postXhr = new XMLHttpRequest();
-                postXhr.open('POST', url + '/answer');
-                postXhr.setRequestHeader('content-type', 'application/json');
-                postXhr.onreadystatechange = function() {
-                  if(4 !== postXhr.readyState) {
-                    return;
-                  }
-                  if(200 === postXhr.status) {
-                    if(answer.oncomplete && 'function' === typeof answer.oncomplete) {
-                      answer.oncomplete.call(null, answer.pc);
-                    }
-                  } else {
-                    if(answer.onerror && 'function' === typeof answer.onerror) {
-                      answer.onerror.call(null, new Error(postXhr.statusText));
-                    }
-                  }
-                };
-                postXhr.send(JSON.stringify({value: rtc_answer.sdp}));
-              }, function(err) { fail(err); });
-            }, function(err) { fail(err); });
-          },
-                                         function(err) { fail(err); });
-        }, function(err) { fail(err); });
+        if (navigator.mozGetUserMedia) {
+          navigator.mozGetUserMedia({audio: true, fake: true}, function(stream) {
+            // Now we have a fake stream.
+            answer.pc.addStream(stream);
+            createAnswer(offer);
+          }, function(err) { fail(err); });
+        } else {
+          //XXX: should have a hook for applications to add streams, otherwise
+          // this isn't very useful
+          createAnswer(offer);
+        }
       } else {
         if(answer.onerror && 'function' === typeof answer.onerror) {
           answer.onerror.call(null, new Error(getXhr.statusText));
